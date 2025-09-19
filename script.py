@@ -1,16 +1,14 @@
 import random
 import subprocess
 import os
-
+import csv
 
 def binary_to_gray(bin_str):
-    """Converts a 4-bit binary string to a Gray code string."""
     val = int(bin_str, 2)
     gray_val = val ^ (val >> 1)
     return format(gray_val, '04b')
 
 def gray_to_binary(gray_str):
-    """Converts a 4-bit Gray code string to a binary string."""
     val = int(gray_str, 2)
     mask = val >> 1
     while mask != 0:
@@ -18,114 +16,104 @@ def gray_to_binary(gray_str):
         mask = mask >> 1
     return format(val, '04b')
 
-# --- Main Verification Logic ---
-
-def run_verification(num_tests=20):
-    """
-    Generates random inputs, runs the Verilog simulation,
-    and verifies the output.
-    """
-    print("--- Starting Verilog Verification ---")
-    mismatches = 0
-    total_checks = 0
-
-    # 1. Generate random input vectors
-    print(f"Generating {num_tests} random 4-bit input vectors...")
-    input_vectors = []
-    for _ in range(num_tests):
-        # Generate a random 4-bit binary number and a random 4-bit gray number
-        rand_bin = format(random.randint(0, 15), '04b')
-        rand_gray = format(random.randint(0, 15), '04b')
-        # Combine them into an 8-bit vector for the testbench
-        input_vectors.append(f"{rand_bin}{rand_gray}")
-
-    # Write vectors to file
-    with open("input_vectors.txt", "w") as f:
-        for vec in input_vectors:
+def run_verilog_tb(tb_file, module_file, input_list, input_type):
+    input_filename = "input_binary.txt" if input_type == 'binary' else "input_gray.txt"
+    with open(input_filename, "w") as f:
+        for vec in input_list:
             f.write(f"{vec}\n")
-    print("Input vectors written to input_vectors.txt")
 
-    # 2. Run Verilog Simulation
-    print("\nRunning Verilog simulation using Icarus Verilog...")
-    verilog_files = ["converter.v", "converter_tb.v"]
-    compile_cmd = ["iverilog", "-o", "converter_tb"] + verilog_files
-    run_cmd = ["vvp", "converter_tb"]
-
+    tb_name = "tb_binary_to_gray.v" if input_type == 'binary' else "tb_gray_to_binary.v"
+    module_name = "binary_to_gray.v" if input_type == 'binary' else "gray_to_binary.v"
+    compile_cmd = ["iverilog", "-o", "tb_run", module_name, tb_name]
+    run_cmd = ["vvp", "tb_run"]
     try:
-        # Compile
         subprocess.run(compile_cmd, check=True, capture_output=True, text=True)
-        # Run
         sim_output = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
-        print("Simulation completed successfully.")
-        print(sim_output.stdout.strip())
+        output_lines = sim_output.stdout.strip().splitlines()
     except subprocess.CalledProcessError as e:
-        print("\n--- Verilog Simulation FAILED ---")
-        print(f"Error during compilation or execution: {e}")
+        print(f"Error running {tb_name}: {e}")
         print("STDOUT:", e.stdout)
         print("STDERR:", e.stderr)
-        return
+        return []
     except FileNotFoundError:
-        print("\n--- Verilog Simulation FAILED ---")
         print("Error: 'iverilog' or 'vvp' not found.")
-        print("Please make sure Icarus Verilog is installed and in your system's PATH.")
-        return
+        return []
+    finally:
+        if os.path.exists("tb_run"):
+            os.remove("tb_run")
+        if os.path.exists(input_filename):
+            os.remove(input_filename)
+
+    results = []
+    for line in output_lines:
+        if "Input" in line and "Output" in line:
+            parts = line.replace(",", "").split()
+            if input_type == 'binary':
+                bin_in = parts[2]
+                gray_out = parts[-1]
+                results.append((bin_in, gray_out))
+            else:
+                gray_in = parts[2]
+                bin_out = parts[-1]
+                results.append((gray_in, bin_out))
+    return results
+
+def main(num_tests=16):
+    print("--- Binary <-> Gray Code Conversion Integration ---")
+
+    bin_inputs = [format(random.randint(0, 15), '04b') for _ in range(num_tests)]
+    gray_inputs = [format(random.randint(0, 15), '04b') for _ in range(num_tests)]
 
 
-    # 3. Verify the outputs
-    print("\n--- Verifying Simulation Outputs ---")
-    try:
-        with open("output_vectors.txt", "r") as f:
-            sim_outputs = f.readlines()
-    except FileNotFoundError:
-        print("Error: output_vectors.txt not found. Simulation may have failed.")
-        return
+    print("Running Verilog: binary_to_gray...")
+    bin2gray_results = run_verilog_tb(
+        "tb_binary_to_gray.v", "binary_to_gray.v", bin_inputs, 'binary')
 
-    for i, line in enumerate(sim_outputs):
-        # Parse inputs and outputs
-        original_bin_in = input_vectors[i][0:4]
-        original_gray_in = input_vectors[i][4:8]
-        parts = line.strip().split()
-        if len(parts) != 2:
-            continue
-        sim_gray_out, sim_bin_out = parts
+    print("Running Verilog: gray_to_binary...")
+    gray2bin_results = run_verilog_tb(
+        "tb_gray_to_binary.v", "gray_to_binary.v", gray_inputs, 'gray')
 
-        # Python's expected results
-        expected_gray = binary_to_gray(original_bin_in)
-        expected_bin = gray_to_binary(original_gray_in)
+    csv_rows = [
+        ["Input Binary", "Gray from Verilog", "Gray from Python", "Input Gray", "Binary from Verilog", "Binary from Python"]
+    ]
+    for i in range(num_tests):
+        bin_in = bin_inputs[i]
+        gray_in = gray_inputs[i]
+        gray_from_verilog = bin2gray_results[i][1] if i < len(bin2gray_results) else "ERR"
+        gray_from_python = binary_to_gray(bin_in)
+        bin_from_verilog = gray2bin_results[i][1] if i < len(gray2bin_results) else "ERR"
+        bin_from_python = gray_to_binary(gray_in)
+        csv_rows.append([
+            bin_in, gray_from_verilog, gray_from_python,
+            gray_in, bin_from_verilog, bin_from_python
+        ])
 
-        # Check Binary -> Gray conversion
-        total_checks += 1
-        if sim_gray_out != expected_gray:
-            mismatches += 1
-            print(f"MISMATCH (Bin->Gray) on test case {i+1}:")
-            print(f"  Input Binary:   {original_bin_in}")
-            print(f"  Verilog Output: {sim_gray_out}")
-            print(f"  Python Expected:  {expected_gray}\n")
+    csv_filename = "conversion_results.csv"
+    with open(csv_filename, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerows(csv_rows)
+    print(f"Results written to {csv_filename}\n")
 
-        # Check Gray -> Binary conversion
-        total_checks += 1
-        if sim_bin_out != expected_bin:
-            mismatches += 1
-            print(f"MISMATCH (Gray->Bin) on test case {i+1}:")
-            print(f"  Input Gray:     {original_gray_in}")
-            print(f"  Verilog Output: {sim_bin_out}")
-            print(f"  Python Expected:  {expected_bin}\n")
 
-    # 4. Report final results
-    print("\n--- Verification Summary ---")
-    if mismatches == 0:
-        print(f"Success! All {total_checks} checks passed across {num_tests} test cases.")
+    print("--- Conversion Results ---")
+    mismatches = []
+    for idx, row in enumerate(csv_rows[1:], 1):
+        print(f"Binary: {row[0]} | Gray (Verilog): {row[1]} | Gray (Python): {row[2]} | "
+              f"Gray: {row[3]} | Binary (Verilog): {row[4]} | Binary (Python): {row[5]}")
+        # Check for mismatches
+        if row[1] != row[2]:
+            mismatches.append(f"Test {idx}: Binary {row[0]} -> Gray mismatch (Verilog: {row[1]}, Python: {row[2]})")
+        if row[4] != row[5]:
+            mismatches.append(f"Test {idx}: Gray {row[3]} -> Binary mismatch (Verilog: {row[4]}, Python: {row[5]})")
+
+    print("\n--- Test Case Verification ---")
+    if not mismatches:
+        print(f"All {num_tests * 2} test cases passed! Verilog and Python outputs match.")
     else:
-        print(f"❌ Failure! Found {mismatches} mismatches out of {total_checks} checks.")
-
-    # Clean up generated files
-    print("\nCleaning up generated files...")
-    for f in ["input_vectors.txt", "output_vectors.txt", "converter_tb"]:
-        if os.path.exists(f):
-            os.remove(f)
-    print("Cleanup complete.")
-
+        print(f"{len(mismatches)} test case(s) failed!")
+        for msg in mismatches:
+            print(msg)
+    print("\nDone.")
 
 if __name__ == "__main__":
-    # You can change the number of random tests here
-    run_verification(num_tests=25)
+    main(num_tests=16)
